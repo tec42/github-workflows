@@ -73,24 +73,25 @@ jobs:
       # them, so the bind mount fails before the container starts and every `make` target after this
       # dies with `invalid mount config for type "bind"`.
       #
-      # **Both paths, because the convention is split.** `identity` binds `./secrets/*.txt`, which is
-      # what this step was written for; `exposee-optimizer` binds `./docker/secrets/*.txt`, which is
-      # what `service-blueprint/.ai/11-security.md` documents. Neither is wrong on its own and the
-      # disagreement is not this workflow's to settle — but a shared workflow that only serves one of
-      # them breaks the other, and it did: exposee-optimizer's CI failed on its first pull request
-      # ever, four months after the service was bootstrapped.
+      # **`secrets/`, and only that**, since 2026-09-07. For a few hours this step wrote
+      # `docker/secrets/` as well, because the convention was genuinely split: `identity` binds
+      # `./secrets/*.txt` while `service-blueprint` documented `docker/secrets/*.txt`, and a shared
+      # workflow that serves one of two breaks the other — which it did, on the first pull request
+      # the only service following the blueprint had ever had. The blueprint has since been corrected
+      # to `secrets/`, so the second path has neither documentation nor a user, and writing it would
+      # be a file nobody looks for.
       #
-      # Writing both is two lines and costs nothing. Clearing `secrets: []` in the CI compose file
-      # was tried first and does not work — Compose merges service-level `secrets` rather than
-      # replacing them, unlike `volumes`.
+      # Two things worth keeping from that afternoon: clearing `secrets: []` in a service's CI
+      # compose file does **not** work — Compose merges service-level `secrets` rather than replacing
+      # them, unlike `volumes`. And if a service ever appears that binds a different path, fix it
+      # there or in the blueprint; do not quietly widen this step again, because that is what hid the
+      # disagreement in the first place.
       - name: 🔐 Create dummy secrets
         run: |
-          mkdir -p secrets docker/secrets
-          for dir in secrets docker/secrets; do
-            echo "test-password"   > "$dir/database_password.txt"
-            echo "test-api-key"    > "$dir/api_key.txt"
-            echo "test-jwt-secret" > "$dir/jwt_secret.txt"
-          done
+          mkdir -p secrets
+          echo "test-password"   > secrets/database_password.txt
+          echo "test-api-key"    > secrets/api_key.txt
+          echo "test-jwt-secret" > secrets/jwt_secret.txt
 
       - name: 🐳 Build Docker images
         env:
