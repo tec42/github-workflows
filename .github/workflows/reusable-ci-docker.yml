@@ -68,12 +68,29 @@ jobs:
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_TOKEN }}
 
+      # A service's compose file binds Docker secrets to files that are gitignored by design — they
+      # hold real values on a developer machine. A runner checks the repository out and has none of
+      # them, so the bind mount fails before the container starts and every `make` target after this
+      # dies with `invalid mount config for type "bind"`.
+      #
+      # **Both paths, because the convention is split.** `identity` binds `./secrets/*.txt`, which is
+      # what this step was written for; `exposee-optimizer` binds `./docker/secrets/*.txt`, which is
+      # what `service-blueprint/.ai/11-security.md` documents. Neither is wrong on its own and the
+      # disagreement is not this workflow's to settle — but a shared workflow that only serves one of
+      # them breaks the other, and it did: exposee-optimizer's CI failed on its first pull request
+      # ever, four months after the service was bootstrapped.
+      #
+      # Writing both is two lines and costs nothing. Clearing `secrets: []` in the CI compose file
+      # was tried first and does not work — Compose merges service-level `secrets` rather than
+      # replacing them, unlike `volumes`.
       - name: 🔐 Create dummy secrets
         run: |
-          mkdir -p secrets
-          echo "test-password" > secrets/database_password.txt
-          echo "test-api-key" > secrets/api_key.txt
-          echo "test-jwt-secret" > secrets/jwt_secret.txt
+          mkdir -p secrets docker/secrets
+          for dir in secrets docker/secrets; do
+            echo "test-password"   > "$dir/database_password.txt"
+            echo "test-api-key"    > "$dir/api_key.txt"
+            echo "test-jwt-secret" > "$dir/jwt_secret.txt"
+          done
 
       - name: 🐳 Build Docker images
         env:
