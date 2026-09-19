@@ -22,7 +22,8 @@ github-workflows/
 │   ├── reusable-ecs-codedeploy.yml         # ECS Blue/Green via CodeDeploy
 │   └── reusable-service-deployment.yml     # Master orchestration
 ├── shared/
-│   └── .release-it.json                    # Release-it configuration
+│   ├── .release-it.json                    # Release-it configuration
+│   └── check-no-plain-http-internal.sh     # CI guard: HTTPS only between services
 ├── examples/
 │   ├── deploy-ecr-with-release.md
 │   └── deploy-ecs-with-codedeploy.md       # Full deployment guide
@@ -102,6 +103,9 @@ Runs lint, type check, build and tests in a Docker Compose environment.
 - `integration_test_target` - Make target for an additional integration step (default: empty →
   step skipped). The caller's compose files have to provide the infrastructure the suite needs,
   and the target itself is responsible for any schema migration
+
+**Jobs:** `Test & Build`, and `No plain HTTP between services` — see below. The second one needs no
+inputs and runs for every caller.
 
 **Secrets:**
 - `DOCKER_HUB_USERNAME` / `DOCKER_HUB_TOKEN` - optional, avoids Docker Hub rate limits
@@ -286,3 +290,35 @@ See [CHANGELOG.md](CHANGELOG.md) for version history.
 ## 📄 License
 
 MIT
+
+## 🔒 No plain HTTP between services
+
+Services talk HTTPS only (INVEST-005-EPIC-008-FEATURE-001 phase 0, Ralf 2026-09-19). Every caller of
+`reusable-ci-docker.yml` gets the job `No plain HTTP between services`, which runs
+`shared/check-no-plain-http-internal.sh` over the repository's terraform and workflow files.
+
+**It fails on** an `http://` URL whose host is internal: a `*-internal.tec42.io` name, the raw NLB name
+(`*.elb.<region>.amazonaws.com`, `tec42-internal-nlb-*`), or an interpolation that resolves to one of
+them (`${local.…_internal_fqdn}`, `$NLB_DNS`).
+
+**It does not fail on** `https://`, a bare port number (step 0.6 still names TCP ports while it runs),
+`localhost`, the public ALB's edge hop in front of render, or a line marked with the escape hatch:
+
+```hcl
+url = "http://something-internal.tec42.io:3050" # plaintext-ok: <reason it has to stay plain>
+```
+
+The fix is the name the NLB listener's certificate covers plus its TLS port, read from remote state
+where an output exists:
+
+```hcl
+value = "https://${local.vehicle_manager_internal_fqdn}:3052/api/v1"
+```
+
+The check is tested against two fixtures under `tests/fixtures/` by
+`.github/workflows/check-no-plain-http-internal.yml`: one that must pass, and one with four planted
+lines that must all be reported. Run it locally with
+
+```bash
+bash shared/check-no-plain-http-internal.sh <path to a service checkout>
+```
