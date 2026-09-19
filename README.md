@@ -315,9 +315,19 @@ where an output exists:
 value = "https://${local.vehicle_manager_internal_fqdn}:3052/api/v1"
 ```
 
-The check is tested against two fixtures under `tests/fixtures/` by
-`.github/workflows/check-no-plain-http-internal.yml`: one that must pass, and one with four planted
-lines that must all be reported. Run it locally with
+The check is tested against two fixtures under `tests/fixtures/`: one that must pass, and one with four
+planted lines that must all be reported. Both assertions live in `tests/run.sh` and in
+`.github/workflows/check-no-plain-http-internal.yml`.
+
+> **This repository's GitHub Actions fail at startup for every workflow** — a 12-line workflow that only
+> checks the repository out fails the same way, and no run here has ever succeeded. That is a repository
+> setting, not a broken file. Until it is fixed, `bash tests/run.sh` is the evidence.
+
+```bash
+bash tests/run.sh          # the fixtures
+```
+
+Run the check itself against a service with
 
 ```bash
 bash shared/check-no-plain-http-internal.sh <path to a service checkout>
