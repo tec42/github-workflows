@@ -23,12 +23,25 @@ set -uo pipefail
 
 ROOT=${1:-.}
 
+# The reusable workflow checks this repository out into `.ci-shared` inside the caller's workspace, so
+# the scan would otherwise walk this script's own test fixtures — which contain planted plaintext URLs
+# on purpose — and fail every caller. Prune the directory this script lives in whenever it is inside
+# the tree being scanned.
+SELF_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+ROOT_ABS=$(cd -- "$ROOT" && pwd)
+PRUNE=()
+if [[ $SELF_DIR == "$ROOT_ABS"/* ]]; then
+  PRUNE=(-path "${SELF_DIR#"$ROOT_ABS"/}" -prune -o -path "./${SELF_DIR#"$ROOT_ABS"/}" -prune -o)
+fi
+
 # Files where an internal address can end up: terraform, and the workflows that build environments.
 mapfile -t FILES < <(
   find "$ROOT" \
+    "${PRUNE[@]}" \
     -path '*/node_modules' -prune -o \
     -path '*/.git' -prune -o \
     -path '*/.terraform' -prune -o \
+    -path '*/.ci-shared' -prune -o \
     -type f \( -name '*.tf' -o -name '*.tfvars' -o -name '*.yml' -o -name '*.yaml' \) -print \
   | grep -E '\.tf$|\.tfvars$|/\.github/workflows/[^/]+\.ya?ml$' \
   | sort
