@@ -1,0 +1,54 @@
+# The self-test for shared/check-no-plain-http-internal.sh.
+#
+# The check is only worth having if it fails on the mistake it is meant to catch, so this runs it
+# against two fixtures: one that must pass and one that must fail. A guard that cannot fail is
+# decoration.
+name: check-no-plain-http-internal
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'shared/check-no-plain-http-internal.sh'
+      - 'tests/fixtures/**'
+      - '.github/workflows/check-no-plain-http-internal.yml'
+  pull_request:
+    paths:
+      - 'shared/check-no-plain-http-internal.sh'
+      - 'tests/fixtures/**'
+      - '.github/workflows/check-no-plain-http-internal.yml'
+  workflow_dispatch:
+
+jobs:
+  fixtures:
+    name: Fixtures
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: ✅ The allowed fixture passes
+        run: bash shared/check-no-plain-http-internal.sh tests/fixtures/pass
+
+      - name: ❌ The planted fixture fails, and names every line
+        run: |
+          set +e
+          output=$(bash shared/check-no-plain-http-internal.sh tests/fixtures/fail)
+          status=$?
+          set -e
+          echo "$output"
+          if [ $status -eq 0 ]; then
+            echo "::error::the check passed on the planted fixture — it would not catch the mistake"
+            exit 1
+          fi
+          for expected in \
+            'main.tf:3' \
+            'main.tf:5' \
+            'main.tf:7' \
+            '.github/workflows/deploy.yml:5'
+          do
+            if ! grep -q "$expected" <<<"$output"; then
+              echo "::error::the check missed $expected"
+              exit 1
+            fi
+          done
+          echo "All four planted lines were reported."

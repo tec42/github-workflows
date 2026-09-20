@@ -1,0 +1,6 @@
+jobs:
+  deploy:
+    steps:
+      # HTTPS to the internal name, and a health check against the container itself.
+      - run: curl -sf "https://$INTEGRATION_HOST:$INTEGRATION_PORT/api/v1/health"
+      - run: curl -sf "http://localhost:3000/api/health"

@@ -53,6 +53,30 @@ on:
         required: false
 
 jobs:
+  # Services talk HTTPS only (INVEST-005-EPIC-008-FEATURE-001 phase 0, Ralf 2026-09-19). This job runs
+  # for every repository that calls this workflow, so nothing has to be wired per repository. It is a
+  # job of its own rather than a step inside `test`: it needs neither Docker nor the compose stack, and
+  # it says on the PR which of the two failed.
+  no-plain-http:
+    name: No plain HTTP between services
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      # tec42/github-workflows is public, so this needs no token. `main` on purpose: every caller uses
+      # this workflow @main, and the check should be the one main carries.
+      - name: 📥 Checkout the shared checks
+        uses: actions/checkout@v4
+        with:
+          repository: tec42/github-workflows
+          ref: main
+          path: .ci-shared
+
+      - name: 🔒 No plain HTTP to an internal address
+        run: bash .ci-shared/shared/check-no-plain-http-internal.sh .
+
   test:
     name: Test & Build
     runs-on: ubuntu-latest

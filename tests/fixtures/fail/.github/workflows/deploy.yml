@@ -1,0 +1,5 @@
+jobs:
+  deploy:
+    steps:
+      # 4 — the same mistake in a workflow, from an environment variable
+      - run: curl -sf "http://$NLB_DNS:3040/api/v1/health"
