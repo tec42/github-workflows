@@ -23,10 +23,10 @@ set -uo pipefail
 
 ROOT=${1:-.}
 
-# The reusable workflow checks this repository out into `.ci-shared` inside the caller's workspace, so
-# the scan would otherwise walk this script's own test fixtures — which contain planted plaintext URLs
-# on purpose — and fail every caller. Prune the directory this script lives in whenever it is inside
-# the tree being scanned.
+# `.ci-shared` below covers the path the reusable workflow uses. This covers the same mistake under any
+# other name: running the check over a tree that contains this script means walking its own fixtures,
+# whose plaintext URLs are planted on purpose. It matters for a repository-root scan of
+# github-workflows itself, which is what its CI will do once Actions run there at all.
 SELF_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 ROOT_ABS=$(cd -- "$ROOT" && pwd)
 PRUNE=()
@@ -34,6 +34,8 @@ if [[ $SELF_DIR == "$ROOT_ABS"/* ]]; then
   PRUNE=(-path "${SELF_DIR#"$ROOT_ABS"/}" -prune -o -path "./${SELF_DIR#"$ROOT_ABS"/}" -prune -o)
 fi
 
+# `.ci-shared` is this repository's own checkout inside the caller's workspace (reusable-ci-docker.yml);
+# its tests/fixtures plant the very lines this script must catch, so it is never part of the caller.
 # Files where an internal address can end up: terraform, and the workflows that build environments.
 mapfile -t FILES < <(
   find "$ROOT" \
