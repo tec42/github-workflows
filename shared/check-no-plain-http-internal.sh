@@ -23,12 +23,15 @@ set -uo pipefail
 
 ROOT=${1:-.}
 
+# `.ci-shared` is this repository's own checkout inside the caller's workspace (reusable-ci-docker.yml);
+# its tests/fixtures plant the very lines this script must catch, so it is never part of the caller.
 # Files where an internal address can end up: terraform, and the workflows that build environments.
 mapfile -t FILES < <(
   find "$ROOT" \
     -path '*/node_modules' -prune -o \
     -path '*/.git' -prune -o \
     -path '*/.terraform' -prune -o \
+    -path '*/.ci-shared' -prune -o \
     -type f \( -name '*.tf' -o -name '*.tfvars' -o -name '*.yml' -o -name '*.yaml' \) -print \
   | grep -E '\.tf$|\.tfvars$|/\.github/workflows/[^/]+\.ya?ml$' \
   | sort
