@@ -23,11 +23,31 @@ set -uo pipefail
 
 ROOT=${1:-.}
 
-# `.ci-shared` is this repository's own checkout inside the caller's workspace (reusable-ci-docker.yml);
-# its tests/fixtures plant the very lines this script must catch, so it is never part of the caller.
+# `.ci-shared` below covers the path the reusable workflow uses. These two cover the same mistake by
+# any other name: scanning a tree that contains this script means walking its own fixtures, whose
+# plaintext URLs are planted on purpose.
+#   - this script's repository, when it sits inside the tree (a checkout under another name)
+#   - its fixtures, when the tree IS this script's repository — what a repository-root scan of
+#     github-workflows does, which is what its own CI will do once Actions run there at all
+SELF_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+ROOT_ABS=$(cd -- "$ROOT" && pwd)
+PRUNE=()
+prune_path() {
+  local abs=$1
+  [[ -e $abs ]] || return 0
+  local rel=${abs#"$ROOT_ABS"/}
+  PRUNE+=(-path "$rel" -prune -o -path "./$rel" -prune -o)
+}
+if [[ $SELF_DIR == "$ROOT_ABS"/* ]]; then
+  prune_path "$SELF_DIR"
+elif [[ $SELF_DIR == "$ROOT_ABS" ]]; then
+  prune_path "$SELF_DIR/tests/fixtures"
+fi
+
 # Files where an internal address can end up: terraform, and the workflows that build environments.
 mapfile -t FILES < <(
   find "$ROOT" \
+    "${PRUNE[@]}" \
     -path '*/node_modules' -prune -o \
     -path '*/.git' -prune -o \
     -path '*/.terraform' -prune -o \
