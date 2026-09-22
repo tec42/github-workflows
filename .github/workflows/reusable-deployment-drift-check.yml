@@ -1,0 +1,174 @@
+# Is what `main` released actually running? (INVEST-005/EPIC-017/FEATURE-002/US-007)
+#
+# **Twice in two days a change was merged, reported as shipped, and was not running.**
+# ai-webstudio42 #189: a Terraform step failed, the container was never replaced, and production
+# served the previous build while code on `main` expected a resource nobody had created. render
+# #435: a re-run could not deploy at all and said success; the change reached production only
+# because the next pipeline carried it.
+#
+# What those have in common is not the cause — it is the **silence**. Every signal a person normally
+# reads said *done*: a green pipeline, a merged pull request, a closed story. The gap between
+# *merged* and *running* was visible only to somebody who already suspected it.
+#
+# **This is the part that sees the class rather than an instance.** The pipeline's own check
+# (`reusable-ecs-codedeploy.yml`) is blind to exactly the case that started this, because a run
+# which *skipped* the deployment skips the check with it. Only something outside the pipeline,
+# asking what is actually running, can notice a deployment that never happened.
+#
+# **A red job is the whole notification.** GitHub already mails the repository's owner, and a path
+# that exists and is trusted beats one that has to be built and then believed.
+name: Deployment Drift Check
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        description: 'The service, as it should read in the alarm'
+        required: true
+        type: string
+      cluster_name:
+        required: true
+        type: string
+      ecs_service_name:
+        required: true
+        type: string
+      container_name:
+        required: true
+        type: string
+      aws_region:
+        required: false
+        default: 'eu-central-1'
+        type: string
+      grace_minutes:
+        description: >-
+          How long after the last merge this stays quiet. The number is the whole design: too short
+          and an ordinary deployment in progress is an alarm nobody believes; too long and this is
+          not a watchdog. 45 minutes is comfortably past a normal pipeline including its blue/green
+          termination wait.
+        required: false
+        default: 45
+        type: number
+    secrets:
+      AWS_ROLE_ARN:
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  drift:
+    name: ${{ inputs.service_name }} — is main running?
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          # The tags are the question; a shallow clone has none of them.
+          fetch-depth: 0
+
+      - name: 🏷️ What main last released, and when it last moved
+        id: expected
+        run: |
+          VERSION=$(git describe --tags --abbrev=0 --match "[0-9]*.[0-9]*.[0-9]*" 2>/dev/null || echo "")
+          MERGED_AT=$(git log -1 --format=%ct main)
+          NOW=$(date +%s)
+          AGE_MINUTES=$(( (NOW - MERGED_AT) / 60 ))
+
+          {
+            echo "version=${VERSION}"
+            echo "age_minutes=${AGE_MINUTES}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "main last released: ${VERSION:-none}"
+          echo "main last moved:    ${AGE_MINUTES} minutes ago"
+
+      # A repository that has never released has nothing to compare, and saying so is better than
+      # inventing a comparison. Not an alarm — a state.
+      - name: ⏭️ Nothing released yet
+        if: steps.expected.outputs.version == ''
+        run: echo "::notice::${{ inputs.service_name }} has no release tag — nothing to compare."
+
+      # **The grace period, and why it is measured from the merge rather than from the deployment.**
+      # A deployment in progress is the normal state right after a merge, and alarming on it would
+      # produce a false alarm on every single release — which is how a watchdog stops being read.
+      - name: ⏭️ Too soon to judge
+        id: grace
+        if: steps.expected.outputs.version != ''
+        env:
+          # Through the environment rather than interpolated into the script: a workflow expression
+          # substituted straight into a shell comparison is both a quoting hazard and unreadable to
+          # shellcheck, which cannot see a number where the template has not run yet.
+          AGE_MINUTES: ${{ steps.expected.outputs.age_minutes }}
+          GRACE_MINUTES: ${{ inputs.grace_minutes }}
+        run: |
+          if [ "$AGE_MINUTES" -lt "$GRACE_MINUTES" ]; then
+            echo "::notice::main moved ${AGE_MINUTES} minutes ago — inside the ${GRACE_MINUTES}-minute grace period, not judging yet."
+            echo "judge=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "judge=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 🔐 Configure AWS credentials
+        if: steps.grace.outputs.judge == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: 🔎 What is actually running
+        id: running
+        if: steps.grace.outputs.judge == 'true'
+        run: |
+          TASK_DEF=$(aws ecs describe-services \
+            --cluster "${{ inputs.cluster_name }}" \
+            --services "${{ inputs.ecs_service_name }}" \
+            --region "${{ inputs.aws_region }}" \
+            --query 'services[0].taskDefinition' --output text)
+
+          IMAGE=$(aws ecs describe-task-definition \
+            --task-definition "$TASK_DEF" \
+            --region "${{ inputs.aws_region }}" \
+            --query "taskDefinition.containerDefinitions[?name=='${{ inputs.container_name }}'].image | [0]" \
+            --output text)
+
+          # The tag is what follows the last colon — and a digest-pinned image has none, which is a
+          # different situation rather than a drift, so it is reported as itself.
+          TAG="${IMAGE##*:}"
+          {
+            echo "image=${IMAGE}"
+            echo "tag=${TAG}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "running task definition: ${TASK_DEF}"
+          echo "running image:           ${IMAGE}"
+
+      - name: ⚖️ Compare
+        if: steps.grace.outputs.judge == 'true'
+        env:
+          EXPECTED: ${{ steps.expected.outputs.version }}
+          RUNNING: ${{ steps.running.outputs.tag }}
+          IMAGE: ${{ steps.running.outputs.image }}
+          AGE: ${{ steps.expected.outputs.age_minutes }}
+        run: |
+          if [ "$EXPECTED" = "$RUNNING" ]; then
+            echo "✅ ${{ inputs.service_name }} is running ${RUNNING}, which is what main released."
+            exit 0
+          fi
+
+          # Everything an alarm needs to be acted on without opening three consoles: which service,
+          # what should be running, what is, and how long that has been true.
+          echo "::error::${{ inputs.service_name }}: main released ${EXPECTED}, but ${RUNNING} is running."
+          echo ""
+          echo "  service:          ${{ inputs.service_name }}"
+          echo "  main released:    ${EXPECTED}"
+          echo "  actually running: ${RUNNING}"
+          echo "  running image:    ${IMAGE}"
+          echo "  main last moved:  ${AGE} minutes ago"
+          echo ""
+          echo "A merged change is not running. Look at the deploy workflow run for the merge that"
+          echo "produced ${EXPECTED}: a pipeline that failed after tagging cannot be completed by"
+          echo "re-running it on a version older than this fix, and a skipped deployment reports"
+          echo "success. See INVEST-005/EPIC-017/FEATURE-002/US-007."
+          exit 1
