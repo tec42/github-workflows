@@ -157,41 +157,59 @@ jobs:
           PREV_TAG=$(git describe --tags --abbrev=0 --match "[0-9]*.[0-9]*.[0-9]*" 2>/dev/null || echo "")
           echo "Previous semver tag: ${PREV_TAG:-none}"
 
+          # INVEST-005/EPIC-017/FEATURE-002/US-007 — **is this commit already released?**
+          #
+          # Asked *before* release-it runs, and that placement is the whole correction. A first
+          # attempt at this pipeline creates the tag on a release commit it pushes; a re-run checks
+          # out the SHA that triggered the workflow — the **merge commit**, one before that release
+          # commit. So:
+          #
+          #   * no tag points at HEAD, so a check for one finds nothing;
+          #   * release-it sees releasable commits and tries to create the tag again;
+          #   * it fails with `fatal: tag '0.147.0' already exists`, and the step dies there.
+          #
+          # My first attempt at this fix asked "does a tag point at HEAD" *after* release-it, so it
+          # never ran at all. Proven on ai-webstudio42 #216: the merge commit 4eb8ff4 carries no
+          # tag, while 0.147.0 points at ea75337 — and 4eb8ff4 **is an ancestor of** 0.147.0.
+          #
+          # Containment is therefore the right question, not identity: *is the code at this commit
+          # already inside a release?* The oldest release containing it is the one that shipped it.
+          RELEASED_AS=""
+          for TAG in $(git tag --list "[0-9]*.[0-9]*.[0-9]*" --sort=v:refname); do
+            if git merge-base --is-ancestor HEAD "$TAG" 2>/dev/null; then
+              RELEASED_AS="$TAG"
+              break
+            fi
+          done
+
+          if [ -n "$RELEASED_AS" ]; then
+            # Pressing "Re-run" on a deploy workflow is a request to deploy. This commit's code is
+            # already released, so that release is the version to deploy — and release-it is not run
+            # at all, which also removes the confusing tag failure the old path produced.
+            {
+              echo "version=${RELEASED_AS}"
+              echo "has_release=true"
+            } >> "$GITHUB_OUTPUT"
+            echo "♻️ This commit is already released as ${RELEASED_AS} — deploying ${RELEASED_AS}."
+            echo "   (Nothing new is released: a re-run redeploys, it does not build a new version.)"
+            exit 0
+          fi
+
           # Run release-it in CI mode (no npm publish)
           npx release-it --ci --no-npm
 
           # Detect if a new semver tag was created (compare against previous)
           NEW_TAG=$(git describe --tags --abbrev=0 --match "[0-9]*.[0-9]*.[0-9]*" 2>/dev/null || echo "")
           if [ -n "$NEW_TAG" ] && [ "$NEW_TAG" != "$PREV_TAG" ]; then
-            echo "version=${NEW_TAG}" >> $GITHUB_OUTPUT
-            echo "has_release=true" >> $GITHUB_OUTPUT
+            {
+              echo "version=${NEW_TAG}"
+              echo "has_release=true"
+            } >> "$GITHUB_OUTPUT"
             echo "📦 Released version: ${NEW_TAG}"
             exit 0
           fi
 
-          # INVEST-005/EPIC-017/FEATURE-002/US-007 — "nothing releasable" and "already released"
-          # are two different states and used to answer the same way.
-          #
-          # A re-run of a pipeline whose first attempt already tagged finds no releasable commits,
-          # because they were released. `has_release` was then false, the deploy job — gated on
-          # exactly that — was skipped, and an image went to ECR under `main-<sha>` that nothing
-          # would ever look for. So a re-run could not deploy at all, and said success. render #435,
-          # 2026-09-22: the change reached production only because the next PR's pipeline carried it.
-          #
-          # Pressing "Re-run" on a deploy workflow is a request to deploy. If this commit is already
-          # released, that release **is** the version to deploy.
-          HEAD_TAG=$(git tag --points-at HEAD --list "[0-9]*.[0-9]*.[0-9]*" | head -n 1)
-          if [ -n "$HEAD_TAG" ]; then
-            {
-              echo "version=${HEAD_TAG}"
-              echo "has_release=true"
-            } >> "$GITHUB_OUTPUT"
-            echo "♻️ This commit is already released as ${HEAD_TAG} — deploying ${HEAD_TAG}."
-            echo "   (Nothing new was released: a re-run redeploys, it does not build a new version.)"
-            exit 0
-          fi
-
-          echo "has_release=false" >> $GITHUB_OUTPUT
+          echo "has_release=false" >> "$GITHUB_OUTPUT"
           echo "ℹ️ No release created (no releasable commits since ${PREV_TAG:-beginning})"
 
   deploy:
