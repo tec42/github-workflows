@@ -1,0 +1,97 @@
+# github-workflows checks itself (INVEST-005/EPIC-017/FEATURE-002/US-008).
+#
+# **This repository had no checks at all** — not a failing one, not a passing one. It is also where
+# a mistake travels furthest: services consume these workflows at `…@main`, so a merge is live
+# everywhere at once, with no deployment to fail and no rollout to pause.
+#
+# Found the expensive way on 2026-09-22: a change meant to repair a broken deployment was written,
+# reviewed, merged, and did not work. It was found by reading the log of a failed production run.
+name: CI
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - '.github/actionlint-baseline.txt'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      # **A baseline, because a check that is red on arrival is one nobody reads.** There are a
+      # hundred-odd existing findings, almost all the same advice about quoting; clearing them is
+      # worth doing on its own terms rather than as the price of having a check at all.
+      #
+      # **Grouped by file and rule, with a count — never a single total.** A change that removes one
+      # problem and introduces another leaves a total unchanged, so a check built on one would stay
+      # green through exactly the change it exists to catch.
+      #
+      # **What this deliberately cannot see**, said here rather than discovered later: swapping one
+      # finding for another *of the same rule in the same file* leaves that file's count for that
+      # rule unchanged, and passes. A new rule anywhere, a new file, or one more of an existing rule
+      # in a file are all caught. That is a narrow blind spot and a stated one.
+      #
+      # Line and column are stripped before comparing: an edit two lines above a finding must not
+      # read as a new finding.
+      - name: 🔍 actionlint against the committed baseline
+        run: |
+          docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:latest -oneline > raw.txt 2>&1 || true
+
+          sed -E 's/^([^:]+):[0-9]+:[0-9]+: (.*)$/\1\t\2/' raw.txt \
+            | sed -E 's/:[0-9]+:[0-9]+:/:/g' \
+            | sort | uniq -c | sed -E 's/^ +//' > current.txt
+
+          echo "--- findings now, grouped by file and rule ---"
+          cat current.txt
+
+          if diff -u .github/actionlint-baseline.txt current.txt > baseline.diff; then
+            echo "✅ No change against the baseline."
+            exit 0
+          fi
+
+          # A line only in `current` is a finding this change introduced; a line only in `baseline`
+          # is one it removed. Removing is never punished — the baseline is simply out of date, and
+          # saying so is friendlier than failing somebody for improving the repository.
+          NEW=$(grep -E '^\+[0-9]' baseline.diff || true)
+          GONE=$(grep -E '^-[0-9]' baseline.diff || true)
+
+          if [ -n "$GONE" ]; then
+            echo ""
+            echo "ℹ️ Findings this change removed (the baseline is now out of date):"
+            echo "$GONE"
+          fi
+
+          if [ -z "$NEW" ]; then
+            echo ""
+            echo "::notice::Only removals — please commit the regenerated baseline."
+            # A heredoc rather than echo: the command it prints is full of backslashes and quotes,
+            # and echo is not required to leave them alone.
+            cat <<'REGENERATE'
+          Regenerate it with:
+
+            docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:latest -oneline \
+              | sed -E 's/^([^:]+):[0-9]+:[0-9]+: (.*)$/\1\t\2/' \
+              | sed -E 's/:[0-9]+:[0-9]+:/:/g' | sort | uniq -c | sed -E 's/^ +//' \
+              > .github/actionlint-baseline.txt
+          REGENERATE
+            exit 0
+          fi
+
+          echo ""
+          echo "::error::This change introduces actionlint findings that are not in the baseline."
+          echo "$NEW"
+          echo ""
+          echo "Each line is: count, file, rule and message. Either fix them, or — if they are"
+          echo "deliberate — regenerate the baseline and say why in the pull request."
+          echo ""
+          echo "The lines with their positions:"
+          grep -F "$(echo "$NEW" | sed -E 's/^\+[0-9]+ //' | cut -f1 | sort -u | head -1)" raw.txt || true
+          exit 1
