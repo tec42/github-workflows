@@ -18,12 +18,14 @@ github-workflows/
 ├── .github/workflows/
 │   ├── reusable-ci-docker.yml              # CI testing
 │   ├── reusable-release-ecr.yml            # Release + ECR push
+│   ├── reusable-terraform-check.yml        # Terraform fmt + validate, on the pull request
 │   ├── reusable-terraform-deploy.yml       # Infrastructure deployment
 │   ├── reusable-ecs-codedeploy.yml         # ECS Blue/Green via CodeDeploy
 │   └── reusable-service-deployment.yml     # Master orchestration
 ├── shared/
 │   ├── .release-it.json                    # Release-it configuration
-│   └── check-no-plain-http-internal.sh     # CI guard: HTTPS only between services
+│   ├── check-no-plain-http-internal.sh     # CI guard: HTTPS only between services
+│   └── terraform-present.sh                # Is there any Terraform here to check?
 ├── examples/
 │   ├── deploy-ecr-with-release.md
 │   └── deploy-ecs-with-codedeploy.md       # Full deployment guide

@@ -1,0 +1,126 @@
+name: Reusable Terraform Check
+
+# Formatting and static validity of a service's Terraform, **on the pull request**
+# (INVEST-005-EPIC-017-FEATURE-002-US-033, phase 1).
+#
+# **Why this exists.** ai-webstudio42 was taken out twice on 2026-09-22 by Terraform faults that
+# reached main green. The deployment pipeline runs Terraform *before* it replaces the container, so
+# a Terraform stage that stops takes down every deploy of that service, whatever the next pull
+# request contains. Until this workflow, the service CI ran **no Terraform at all** — not `fmt`, not
+# `validate`. The only `terraform plan` in the organisation is in `reusable-terraform-deploy.yml`,
+# on main, after the merge.
+#
+# **What it does not catch, said here so nobody relies on it.** `validate` checks what it can see
+# statically. The afternoon fault of 2026-09-22 — a task-definition family name where an ARN was
+# required — came from a resource attribute and was unknown until the plan, so this would have let
+# it through. A missing IAM permission is further out of reach still: it appears only at **apply**.
+# Phase 2 of US-033 adds the plan; nothing short of an apply finds the permission class.
+#
+# **The same Terraform as the deploy.** `terraform_version` defaults to what
+# `reusable-terraform-deploy.yml` defaults to. A gate that runs a different version can pass while
+# the deploy fails, which is worse than no gate, because it is believed.
+
+on:
+  workflow_call:
+    inputs:
+      terraform_dir:
+        description: 'Directory holding the service Terraform'
+        required: false
+        type: string
+        default: 'terraform'
+      terraform_version:
+        description: 'Must match reusable-terraform-deploy.yml, or the gate can disagree with the deploy'
+        required: false
+        type: string
+        default: '1.12.0'
+    secrets:
+      TF_MODULES_SSH_KEY:
+        description: >-
+          Deploy key for the private tf-module-* repositories. Optional: without it the formatting
+          check still runs and validation is skipped with a notice, because `terraform init` cannot
+          fetch the modules and a red job would say nothing about the change.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  terraform-check:
+    name: Terraform — format and validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      # tec42/github-workflows is public, so this needs no token. `main` on purpose: every caller
+      # uses this workflow @main, and the check should be the one main carries.
+      - name: 📥 Checkout the shared checks
+        uses: actions/checkout@v4
+        with:
+          repository: tec42/github-workflows
+          ref: main
+          path: .ci-shared
+
+      # A service with no Terraform is not a failure, it is a service with no Terraform. The answer
+      # is a script rather than four lines here so that it can be tested — see
+      # tests/run-terraform-present.sh.
+      - name: 🔎 Is there anything to check?
+        id: probe
+        env:
+          TF_DIR: ${{ inputs.terraform_dir }}
+        run: |
+          if bash .ci-shared/shared/terraform-present.sh "$TF_DIR"; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No .tf files under '$TF_DIR' — nothing to check."
+          fi
+
+      # The `secrets` context cannot be read in an `if:`, so its presence becomes an output here.
+      # Only the emptiness of the value is ever printed.
+      - name: 🔎 Is the module deploy key available?
+        id: keycheck
+        if: steps.probe.outputs.present == 'true'
+        env:
+          TF_MODULES_SSH_KEY: ${{ secrets.TF_MODULES_SSH_KEY }}
+        run: |
+          if [ -n "$TF_MODULES_SSH_KEY" ]; then
+            echo "have=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 🔧 Terraform ${{ inputs.terraform_version }}
+        if: steps.probe.outputs.present == 'true'
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          terraform_wrapper: false
+
+      # Formatting needs nothing at all — no credentials, no modules, no network.
+      - name: 🎨 terraform fmt -check
+        if: steps.probe.outputs.present == 'true'
+        working-directory: ${{ inputs.terraform_dir }}
+        run: terraform fmt -check -recursive
+
+      # `terraform validate` requires `init`, and `init` fetches the private tf-module-*
+      # repositories over SSH even with `-backend=false`.
+      - name: 🔑 SSH for the private Terraform modules
+        if: steps.keycheck.outputs.have == 'true'
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.TF_MODULES_SSH_KEY }}
+
+      - name: 🧮 terraform init -backend=false && validate
+        if: steps.keycheck.outputs.have == 'true'
+        working-directory: ${{ inputs.terraform_dir }}
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+      # Half a gate that says so beats a red cross that means "a secret is missing".
+      - name: ⏭️ Validation skipped
+        if: steps.keycheck.outputs.have == 'false'
+        run: |
+          echo "::notice::TF_MODULES_SSH_KEY was not provided — formatting was checked, validation was not."
