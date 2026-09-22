@@ -13,6 +13,9 @@ on:
     paths:
       - '.github/workflows/**'
       - '.github/actionlint-baseline.txt'
+      # The shared checks the workflows call, and their self-tests (US-033).
+      - 'shared/**'
+      - 'tests/**'
   workflow_dispatch:
 
 permissions:
@@ -95,3 +98,16 @@ jobs:
           echo "The lines with their positions:"
           grep -F "$(echo "$NEW" | sed -E 's/^\+[0-9]+ //' | cut -f1 | sort -u | head -1)" raw.txt || true
           exit 1
+
+  # The self-test of shared/terraform-present.sh. It is a script first and a job second, because
+  # this repository's Actions currently fail at startup for every workflow — see
+  # tests/run-terraform-present.sh, which is runnable anywhere and says the same thing.
+  terraform-present:
+    name: shared/terraform-present.sh
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+
+      - name: 🧪 A repository with no Terraform must not fail
+        run: bash tests/run-terraform-present.sh
