@@ -90,23 +90,54 @@ jobs:
           aws-region: ${{ inputs.aws_region }}
           role-session-name: GitHubActions-ECS-CodeDeploy
 
-      - name: 🔍 Check for active deployments
+      # INVEST-005/EPIC-017/FEATURE-002/US-007 — **wait, do not abort.**
+      #
+      # This used to `exit 1` the moment another deployment was in progress, which turned an
+      # ordinary queue into a failed pipeline — and a failed pipeline here could not be completed by
+      # re-running it (see `reusable-release-ecr.yml`'s own note). render #435 is what that costs:
+      # merged, green, and not running.
+      #
+      # **Waiting here is not made redundant by the `concurrency` group on the calling workflow.**
+      # That group ends when the run ends, and CodeDeploy's blue/green termination wait outlives it:
+      # the deployment group is still busy after the pipeline that started it has gone home. Only a
+      # question put to CodeDeploy itself sees that.
+      - name: 🔍 Wait for any active deployment to finish
         id: check-active
+        env:
+          # Longer than a blue/green termination wait, short enough that a stuck deployment is a
+          # failed job rather than an hour of a runner. A ceiling somebody chose, not a loop.
+          MAX_WAIT_SECONDS: '1800'
+          POLL_SECONDS: '20'
         run: |
-          echo "Checking for active deployments..."
-          ACTIVE=$(aws deploy list-deployments \
-            --application-name ${{ inputs.codedeploy_application }} \
-            --deployment-group-name ${{ inputs.codedeploy_deployment_group }} \
-            --include-only-statuses InProgress \
-            --output json | jq -r '.deployments[0] // empty')
-          
-          if [ -n "$ACTIVE" ]; then
-            echo "❌ Deployment already in progress: $ACTIVE"
-            echo "Please wait for current deployment to complete or cancel it manually."
-            exit 1
-          fi
-          
-          echo "✅ No active deployments found"
+          WAITED=0
+          while :; do
+            ACTIVE=$(aws deploy list-deployments \
+              --application-name ${{ inputs.codedeploy_application }} \
+              --deployment-group-name ${{ inputs.codedeploy_deployment_group }} \
+              --include-only-statuses InProgress \
+              --output json | jq -r '.deployments[0] // empty')
+
+            if [ -z "$ACTIVE" ]; then
+              if [ "$WAITED" -gt 0 ]; then
+                echo "✅ The deployment group is free after ${WAITED}s — continuing."
+              else
+                echo "✅ No active deployments found"
+              fi
+              break
+            fi
+
+            if [ "$WAITED" -ge "$MAX_WAIT_SECONDS" ]; then
+              echo "::error::Deployment $ACTIVE has been in progress for more than ${MAX_WAIT_SECONDS}s."
+              echo "This job waited rather than failing immediately, and has now given up. Either"
+              echo "that deployment is stuck and wants a person, or the ceiling is too low for this"
+              echo "service's termination wait."
+              exit 1
+            fi
+
+            echo "⏳ Deployment $ACTIVE is in progress — waited ${WAITED}s of ${MAX_WAIT_SECONDS}s."
+            sleep "$POLL_SECONDS"
+            WAITED=$((WAITED + POLL_SECONDS))
+          done
 
       - name: 📦 Download current Task Definition
         id: download-taskdef
