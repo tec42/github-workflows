@@ -272,7 +272,51 @@ jobs:
             echo "✅ ECR repository created: $ECR_REPOSITORY"
             fi
 
+      # **The second half of the re-run fix** (INVEST-005/EPIC-017/FEATURE-002/US-007).
+      #
+      # The first half taught the release step to recognise a commit that is already released and
+      # to deploy that version instead of dying on the existing tag. It works — and the run still
+      # could not finish, because everything below this line then built the image and pushed it
+      # under a tag that is already in ECR:
+      #
+      #     tag invalid: The image tag '0.212.2' already exists in the 'render' repository
+      #     and cannot be overwritten because the tag is immutable.
+      #
+      # The job fails there, so **CodeDeploy is skipped** and the symptom is the one the whole
+      # story is about: merged, and not running. Measured on render's production deploy of
+      # 2026-09-22 (runs 35785032484 and 35785059098, the same commit fifteen seconds apart).
+      #
+      # **The rule is simply that there is nothing to push.** A tag names one immutable thing: the
+      # version for a release, and `branch-<sha8>` otherwise, both of which already identify the
+      # source exactly. If ECR holds it, the image for this version exists and the deploy below can
+      # have it.
+      #
+      # **What this deliberately gives up**, said here rather than discovered: a re-run no longer
+      # rebuilds a tag that is already published. If a build ever produced a bad image, re-running
+      # the pipeline will not replace it — that needs the tag deleted, or a new version. That is the
+      # right trade: silently overwriting a released tag is worse than refusing to, and on an
+      # immutable repository it was never possible anyway.
+      - name: 🔎 Is this image already in ECR?
+        id: existing_image
+        env:
+          ECR_REPOSITORY: ${{ inputs.ecr_repository }}
+          AWS_REGION: ${{ inputs.aws_region }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-ids "imageTag=$VERSION" \
+            --region "$AWS_REGION" \
+            --output text >/dev/null 2>&1; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "♻️ $ECR_REPOSITORY:$VERSION is already in ECR — skipping the build and the push."
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "🏗️ $ECR_REPOSITORY:$VERSION is not in ECR yet — building it."
+          fi
+
       - name: 🏗️ Build Docker image
+        if: steps.existing_image.outputs.present != 'true'
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ inputs.ecr_repository }}
@@ -292,6 +336,7 @@ jobs:
           docker tag ${{ inputs.service_name }}:$VERSION $ECR_REGISTRY/$ECR_REPOSITORY:$VERSION
 
       - name: 🚀 Push to ECR
+        if: steps.existing_image.outputs.present != 'true'
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ inputs.ecr_repository }}
