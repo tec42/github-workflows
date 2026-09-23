@@ -1,5 +1,21 @@
 name: Service Deployment (Master Orchestration)
 
+# INVEST-005/EPIC-017/FEATURE-002/US-007 — one deployment per service at a time.
+#
+# **`cancel-in-progress: false`, deliberately.** Cancelling the waiting run would be the same
+# silence in a new place: a pipeline that never deployed and said nothing about it, which is the
+# whole fault this story exists to remove. The second run waits and then does its work.
+#
+# **This does not replace the wait inside `reusable-ecs-codedeploy.yml`.** GitHub's concurrency ends
+# when this workflow ends, and CodeDeploy's own termination wait outlives it — a deployment group
+# can still be busy after the run that started it has finished. That is exactly what render #435 ran
+# into, so both guards exist and neither is redundant.
+concurrency:
+  # Keyed by the deployment group, which is what a CodeDeploy run actually contends for — and
+  # which exists as an input, unlike an 'environment' this workflow has never had.
+  group: deploy-${{ inputs.codedeploy_application }}-${{ inputs.codedeploy_deployment_group }}
+  cancel-in-progress: false
+
 on:
   workflow_call:
     inputs:
