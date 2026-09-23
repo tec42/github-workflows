@@ -253,6 +253,68 @@ jobs:
           echo "✅ Initial health check passed!"
           echo "status=success" >> $GITHUB_OUTPUT
 
+      # INVEST-005/EPIC-017/FEATURE-002/US-007, phase 2 — **did the deployment actually take?**
+      #
+      # Everything before this reports on the deployment being *created* and on a health check. None
+      # of it asks the question a person actually has: is the service running the image this run
+      # just built? ai-webstudio42 #189 answered "deployment created" and served the previous build
+      # for hours.
+      #
+      # **Only when the deployment finished inside the wait above.** The step before this one waits
+      # three minutes and then deliberately lets a longer deployment continue in the background —
+      # the hybrid strategy. During a blue/green shift the service still names the old task
+      # definition, so reading it back early would report a mismatch on a deployment that is going
+      # perfectly. A check that cries wolf on the normal case is worse than no check.
+      #
+      # So this verifies the fast case and **says out loud when it cannot verify** rather than
+      # implying success by silence. The slow case is what the drift watchdog exists for
+      # (`reusable-deployment-drift-check.yml`), and that one sees it from outside, minutes later,
+      # without needing this run to still be alive.
+      - name: 🔍 Verify the running image is the one we built
+        if: steps.wait-deployment.outputs.status == 'success'
+        env:
+          # The image this run actually built, from the step that built it — there is no
+          # `image_uri` input, and the service is named `service_name` here rather than
+          # `ecs_service_name`. Both checked against the input list rather than assumed.
+          EXPECTED_IMAGE: ${{ steps.build-image-uri.outputs.image_uri }}
+        run: |
+          TASK_DEF=$(aws ecs describe-services \
+            --cluster "${{ inputs.cluster_name }}" \
+            --services "${{ inputs.service_name }}" \
+            --query 'services[0].taskDefinition' --output text)
+
+          RUNNING_IMAGE=$(aws ecs describe-task-definition \
+            --task-definition "$TASK_DEF" \
+            --query "taskDefinition.containerDefinitions[?name=='${{ inputs.container_name }}'].image | [0]" \
+            --output text)
+
+          echo "expected: ${EXPECTED_IMAGE}"
+          echo "running:  ${RUNNING_IMAGE}"
+
+          if [ "$RUNNING_IMAGE" = "$EXPECTED_IMAGE" ]; then
+            echo "✅ The service is running the image this run built."
+            exit 0
+          fi
+
+          echo "::error::The deployment reported success, but the service is not running the image this run built."
+          echo ""
+          echo "  expected: ${EXPECTED_IMAGE}"
+          echo "  running:  ${RUNNING_IMAGE}"
+          echo "  service:  ${{ inputs.service_name }}"
+          echo ""
+          echo "A green deployment that did not replace the image is the failure this check exists"
+          echo "to make visible — see INVEST-005/EPIC-017/FEATURE-002/US-007."
+          exit 1
+
+      # The counterpart to the step above: a run that could not verify says so, because a check that
+      # is silent when it did not run is indistinguishable from one that passed.
+      - name: ℹ️ Could not verify from here
+        if: steps.wait-deployment.outputs.status != 'success'
+        run: |
+          echo "::notice::The deployment was still in progress when this run finished, so this run"
+          echo "cannot say whether the new image is serving. That is normal for a blue/green shift"
+          echo "longer than three minutes. The drift check will answer it from outside."
+
       - name: 📊 Display Deployment Summary
         if: always()
         run: |
