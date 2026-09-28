@@ -48,6 +48,19 @@ on:
         required: false
         default: 45
         type: number
+      intentionally_paused:
+        description: >-
+          A service can be deliberately left behind `main` — held back on purpose, not broken
+          (INVEST-005/EPIC-017/FEATURE-002/US-007 AC6). Set from the calling repository's own
+          `vars.DEPLOY_INTENTIONALLY_PAUSED` (a repository variable, not a file or a label — the
+          one thing here toggled by an ops decision rather than a commit, and unset is the ordinary
+          case for every service that has never needed it). The check still runs every time a
+          pause is on, and still says so every time, in the log — silence is exactly the failure
+          mode this story exists to remove, and an exemption that stops announcing itself would be
+          a second version of the same fault, just moved one level up.
+        required: false
+        default: false
+        type: boolean
     secrets:
       AWS_ROLE_ARN:
         required: true
@@ -61,7 +74,16 @@ jobs:
     name: ${{ inputs.service_name }} — is main running?
     runs-on: ubuntu-latest
     steps:
+      # Checked first, before the checkout it would otherwise pay for: a pause costs nothing, and
+      # is never itself the thing that breaks. A `::notice::`, not silence — see the input's own
+      # description for why an exemption must keep announcing itself.
+      - name: ⏸️ Deliberately paused
+        if: inputs.intentionally_paused == true
+        run: |
+          echo "::notice::${{ inputs.service_name }} is marked intentionally_paused (vars.DEPLOY_INTENTIONALLY_PAUSED) — not comparing against main this run. Unset it once this service should track main again."
+
       - name: 📥 Checkout
+        if: inputs.intentionally_paused != true
         uses: actions/checkout@v4
         with:
           ref: main
@@ -70,6 +92,7 @@ jobs:
 
       - name: 🏷️ What main last released, and when it last moved
         id: expected
+        if: inputs.intentionally_paused != true
         run: |
           VERSION=$(git describe --tags --abbrev=0 --match "[0-9]*.[0-9]*.[0-9]*" 2>/dev/null || echo "")
           MERGED_AT=$(git log -1 --format=%ct main)
@@ -86,8 +109,13 @@ jobs:
 
       # A repository that has never released has nothing to compare, and saying so is better than
       # inventing a comparison. Not an alarm — a state.
+      #
+      # `intentionally_paused` is checked again here (not only on the step above): when it is set,
+      # `expected` never ran, so its `version` output reads as empty — exactly the "never released"
+      # shape — and without this guard a paused service would get the wrong notice on top of the
+      # right one.
       - name: ⏭️ Nothing released yet
-        if: steps.expected.outputs.version == ''
+        if: inputs.intentionally_paused != true && steps.expected.outputs.version == ''
         run: echo "::notice::${{ inputs.service_name }} has no release tag — nothing to compare."
 
       # **The grace period, and why it is measured from the merge rather than from the deployment.**
@@ -95,7 +123,7 @@ jobs:
       # produce a false alarm on every single release — which is how a watchdog stops being read.
       - name: ⏭️ Too soon to judge
         id: grace
-        if: steps.expected.outputs.version != ''
+        if: inputs.intentionally_paused != true && steps.expected.outputs.version != ''
         env:
           # Through the environment rather than interpolated into the script: a workflow expression
           # substituted straight into a shell comparison is both a quoting hazard and unreadable to
