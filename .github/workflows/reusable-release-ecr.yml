@@ -153,64 +153,124 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Record last semver tag before release-it runs (excludes desktop-v* and other prefixed tags)
-          PREV_TAG=$(git describe --tags --abbrev=0 --match "[0-9]*.[0-9]*.[0-9]*" 2>/dev/null || echo "")
-          echo "Previous semver tag: ${PREV_TAG:-none}"
+          # daily-business-US-063 — an *ordinary* merge of a different PR is never gated by any
+          # workflow concurrency group (merging is a plain git operation on GitHub, entirely
+          # outside Actions' control — the concurrency group in reusable-service-deployment.yml
+          # only serializes two runs of *this* workflow against each other, and correctly does;
+          # it has nothing to say about a second PR's merge button). If that merge lands on main
+          # between this job's checkout and release-it's own push — a window of a few seconds to
+          # release-it's own full runtime — the push comes back non-fast-forward, release-it rolls
+          # its local commit/tag back, and the whole job dies. Every downstream job gated on
+          # has_release is then skipped: the merge is silently never deployed, with nothing but a
+          # red workflow run to notice it by. Found live 2026-09-29, ai-webstudio42 #282/#283
+          # merging 47s apart (run 36601014944 hit exactly this; a second, independently-triggered
+          # run for #283 happened to carry both changesets afterward — luck of timing, not a fix).
+          #
+          # Retried up to MAX_ATTEMPTS: on a failure, re-fetch and reset to main's current tip
+          # (discarding release-it's own rolled-back state and any local-only tag it left behind),
+          # and try again from there — the same fix task's own "retry with rebase" option. Fetching
+          # fresh on *every* attempt, not just after a failure, means an attempt that is itself
+          # racing a still-in-flight concurrent release also gets the newest tip to check against.
+          MAX_ATTEMPTS=3
+          ATTEMPT=1
 
-          # INVEST-005/EPIC-017/FEATURE-002/US-007 — **is this commit already released?**
-          #
-          # Asked *before* release-it runs, and that placement is the whole correction. A first
-          # attempt at this pipeline creates the tag on a release commit it pushes; a re-run checks
-          # out the SHA that triggered the workflow — the **merge commit**, one before that release
-          # commit. So:
-          #
-          #   * no tag points at HEAD, so a check for one finds nothing;
-          #   * release-it sees releasable commits and tries to create the tag again;
-          #   * it fails with `fatal: tag '0.147.0' already exists`, and the step dies there.
-          #
-          # My first attempt at this fix asked "does a tag point at HEAD" *after* release-it, so it
-          # never ran at all. Proven on ai-webstudio42 #216: the merge commit 4eb8ff4 carries no
-          # tag, while 0.147.0 points at ea75337 — and 4eb8ff4 **is an ancestor of** 0.147.0.
-          #
-          # Containment is therefore the right question, not identity: *is the code at this commit
-          # already inside a release?* The oldest release containing it is the one that shipped it.
-          RELEASED_AS=""
-          for TAG in $(git tag --list "[0-9]*.[0-9]*.[0-9]*" --sort=v:refname); do
-            if git merge-base --is-ancestor HEAD "$TAG" 2>/dev/null; then
-              RELEASED_AS="$TAG"
-              break
+          while [ "$ATTEMPT" -le "$MAX_ATTEMPTS" ]; do
+            echo "── release-it attempt ${ATTEMPT}/${MAX_ATTEMPTS} ──"
+            git fetch origin main --tags --force
+            git checkout -B main origin/main
+
+            # US-063 — a tag ref and a branch ref in the same `git push ... --tags` are not one
+            # atomic operation: the tag half can succeed while the branch half is rejected
+            # non-fast-forward, leaving an orphaned tag on the remote that points to a commit no
+            # branch contains (found live in this fix's own rebase-race simulation, not in
+            # production — see the story's own TL Notes). A tag like that survives a plain "delete
+            # local tags the remote doesn't have" cleanup, since the remote *does* have it; the
+            # real question is whether main's fresh tip actually contains it. Any semver tag that
+            # doesn't is orphaned — from this run's own last attempt, or an earlier run's — and is
+            # deleted on both sides before computing anything, or a retry silently recomputes the
+            # same version number, finds the local tag already exists, and (depending on exactly
+            # where that failure lands) can report no release at all for a change that has none.
+            for T in $(git tag --list "[0-9]*.[0-9]*.[0-9]*"); do
+              if ! git merge-base --is-ancestor "$T" origin/main 2>/dev/null; then
+                echo "🧹 removing orphaned tag $T (not reachable from origin/main)"
+                git push origin ":refs/tags/$T" 2>/dev/null || true
+                git tag -d "$T" >/dev/null 2>&1 || true
+              fi
+            done
+
+            # Record last semver tag before release-it runs (excludes desktop-v* and other prefixed tags)
+            PREV_TAG=$(git describe --tags --abbrev=0 --match "[0-9]*.[0-9]*.[0-9]*" 2>/dev/null || echo "")
+            echo "Previous semver tag: ${PREV_TAG:-none}"
+
+            # INVEST-005/EPIC-017/FEATURE-002/US-007 — **is this commit already released?**
+            #
+            # Asked *before* release-it runs, and that placement is the whole correction. A first
+            # attempt at this pipeline creates the tag on a release commit it pushes; a re-run checks
+            # out the SHA that triggered the workflow — the **merge commit**, one before that release
+            # commit. So:
+            #
+            #   * no tag points at HEAD, so a check for one finds nothing;
+            #   * release-it sees releasable commits and tries to create the tag again;
+            #   * it fails with `fatal: tag '0.147.0' already exists`, and the step dies there.
+            #
+            # My first attempt at this fix asked "does a tag point at HEAD" *after* release-it, so it
+            # never ran at all. Proven on ai-webstudio42 #216: the merge commit 4eb8ff4 carries no
+            # tag, while 0.147.0 points at ea75337 — and 4eb8ff4 **is an ancestor of** 0.147.0.
+            #
+            # Containment is therefore the right question, not identity: *is the code at this commit
+            # already inside a release?* The oldest release containing it is the one that shipped it.
+            # HEAD is main's just-refetched tip here (US-063), so on a retry this also correctly
+            # recognizes a release a concurrent run already completed while we were retrying.
+            RELEASED_AS=""
+            for TAG in $(git tag --list "[0-9]*.[0-9]*.[0-9]*" --sort=v:refname); do
+              if git merge-base --is-ancestor HEAD "$TAG" 2>/dev/null; then
+                RELEASED_AS="$TAG"
+                break
+              fi
+            done
+
+            if [ -n "$RELEASED_AS" ]; then
+              # Pressing "Re-run" on a deploy workflow is a request to deploy. This commit's code is
+              # already released, so that release is the version to deploy — and release-it is not run
+              # at all, which also removes the confusing tag failure the old path produced.
+              {
+                echo "version=${RELEASED_AS}"
+                echo "has_release=true"
+              } >> "$GITHUB_OUTPUT"
+              echo "♻️ This commit is already released as ${RELEASED_AS} — deploying ${RELEASED_AS}."
+              echo "   (Nothing new is released: a re-run redeploys, it does not build a new version.)"
+              exit 0
             fi
+
+            # Run release-it in CI mode (no npm publish)
+            if npx release-it --ci --no-npm; then
+              # Detect if a new semver tag was created (compare against previous)
+              NEW_TAG=$(git describe --tags --abbrev=0 --match "[0-9]*.[0-9]*.[0-9]*" 2>/dev/null || echo "")
+              if [ -n "$NEW_TAG" ] && [ "$NEW_TAG" != "$PREV_TAG" ]; then
+                {
+                  echo "version=${NEW_TAG}"
+                  echo "has_release=true"
+                } >> "$GITHUB_OUTPUT"
+                echo "📦 Released version: ${NEW_TAG}"
+                exit 0
+              fi
+
+              echo "has_release=false" >> "$GITHUB_OUTPUT"
+              echo "ℹ️ No release created (no releasable commits since ${PREV_TAG:-beginning})"
+              exit 0
+            fi
+
+            echo "⚠️ release-it failed on attempt ${ATTEMPT} (commonly a concurrent push to main) — retrying; the next attempt's own orphaned-tag cleanup above handles whatever this one left behind."
+            ATTEMPT=$((ATTEMPT + 1))
+            sleep $((RANDOM % 5 + 3))
           done
 
-          if [ -n "$RELEASED_AS" ]; then
-            # Pressing "Re-run" on a deploy workflow is a request to deploy. This commit's code is
-            # already released, so that release is the version to deploy — and release-it is not run
-            # at all, which also removes the confusing tag failure the old path produced.
-            {
-              echo "version=${RELEASED_AS}"
-              echo "has_release=true"
-            } >> "$GITHUB_OUTPUT"
-            echo "♻️ This commit is already released as ${RELEASED_AS} — deploying ${RELEASED_AS}."
-            echo "   (Nothing new is released: a re-run redeploys, it does not build a new version.)"
-            exit 0
-          fi
-
-          # Run release-it in CI mode (no npm publish)
-          npx release-it --ci --no-npm
-
-          # Detect if a new semver tag was created (compare against previous)
-          NEW_TAG=$(git describe --tags --abbrev=0 --match "[0-9]*.[0-9]*.[0-9]*" 2>/dev/null || echo "")
-          if [ -n "$NEW_TAG" ] && [ "$NEW_TAG" != "$PREV_TAG" ]; then
-            {
-              echo "version=${NEW_TAG}"
-              echo "has_release=true"
-            } >> "$GITHUB_OUTPUT"
-            echo "📦 Released version: ${NEW_TAG}"
-            exit 0
-          fi
-
-          echo "has_release=false" >> "$GITHUB_OUTPUT"
-          echo "ℹ️ No release created (no releasable commits since ${PREV_TAG:-beginning})"
+          # daily-business-US-063 — loud, not a red X someone has to go looking for: names the
+          # exact cause (this org has no Slack/issue-creation wired into any workflow yet — see
+          # the story's own TL Notes) and what to do about it. The existing hourly deployment-
+          # drift check remains the outer safety net if this is somehow still missed.
+          echo "::error::release-it could not push after ${MAX_ATTEMPTS} attempts — main kept moving out from under it (concurrent merges). This merge was NOT released or deployed. Re-run this workflow once main is quiet, or push a new commit to retrigger."
+          exit 1
 
   deploy:
     name: Deploy to ECR

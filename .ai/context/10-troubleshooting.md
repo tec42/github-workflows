@@ -103,6 +103,32 @@ on:
 
 ---
 
+### Create Release retries, or fails after 3 attempts (daily-business-US-063)
+
+**Symptom**: The `Create Release` job's log shows `── release-it attempt 2/3 ──` (or 3/3), or ends
+in `::error::release-it could not push after 3 attempts`.
+
+**Cause**: an *ordinary* merge of a different PR landed on `main` while this run's own release-it
+was still computing its version bump — a real, unavoidable race in any repo with more than one
+active contributor, and one that gets more common, not less, the more merges land close together
+(Nx IT's own merges included). Merging a PR is a plain git operation on GitHub, never gated by any
+workflow's `concurrency:` group (that only serializes two runs of *this* workflow against each
+other, which already works correctly and is a separate thing — see
+`reusable-service-deployment.yml`'s own top-of-file comment).
+
+**This is expected, self-healing behavior, not a bug to work around**: the step re-fetches `main`'s
+current tip and retries, up to 3 times, and on success releases whatever is on `main` by then —
+including the commit that raced it. No developer action needed for a retry that eventually
+succeeds; nothing to look for beyond the log line itself.
+
+**If it still fails after 3 attempts** (three-plus merges landing inside the same short window —
+rare, but the whole reason this note exists): the merge was **not released or deployed**. Re-run
+the workflow once `main` has settled, or push a new commit to retrigger. The hourly deployment-
+drift check (`reusable-deployment-drift-check.yml`) remains the outer safety net if this is somehow
+still missed — it compares what `main` claims is released against what's actually running.
+
+---
+
 ### CodeDeploy deployment fails
 
 **Symptom**: `Deployment already in progress`
